@@ -7,15 +7,9 @@
 	"schema": {
 		"type": "object",
 		"properties": {
-			"username": {
-				"title": "Username",
-				"description": "Your tado° account username",
-				"type": "string",
-				"required": true
-			},
-			"password": {
-				"title": "Password",
-				"description": "Your tado° account password",
+			"device_code": {
+				"title": "Device Code",
+				"description": "The unique `device code` for your device",
 				"type": "string",
 				"required": true
 			},
@@ -63,7 +57,7 @@
 				"required": false
 			},
 			"tadoMode": {
-				"title": "tado° Mode",
+				"title": "Tado° Mode",
 				"type": "string",
 				"default": "MANUAL",
 				"required": true,
@@ -170,12 +164,12 @@
 		}
 	},
 	"layout": [
-		{
-			"key": "username"
-		},
-		{
-			"key": "password"
-		},
+    		{
+      			"key": "authorizeTado",
+      			"title": "Authorize Tado",
+      			"type": "button",
+			"description": "Create the `authorize` request, still needs to be manually approved"
+    		},
 		{
 			"key": "tadoMode"
 		},
@@ -233,6 +227,7 @@
 			"title": "Advanced Settings",
 			"description": "Don't change these, unless you understand what you're doing.",
 			"items": [
+				"device_code",
 				"statePollingInterval",
 				"homeID",
 				"forceThermostat",
