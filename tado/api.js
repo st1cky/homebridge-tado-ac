@@ -3,11 +3,16 @@ let axios = axiosLib.create();
 const qs = require('qs')
 
 const baseURL = 'https://my.tado.com/api/v2'
-let log, storage, token, settings, homeId, username, password
+let log, storage, token, settings, homeId, deviceCode
+
+const clientId = '1bb50063-6b0c-4d11-bd99-387f4a91cc46';
+const deviceAuthURL = 'https://login.tado.com/oauth2/device_authorize';
+const tokenURL = 'https://login.tado.com/oauth2/token';
 
 module.exports = async function (platform) {
 	log = platform.log
 	storage = platform.storage
+	deviceCode = platform.deviceCode
 
 	const storageSettings = await storage.getItem('settings')
 	if (storageSettings) {
@@ -17,10 +22,6 @@ module.exports = async function (platform) {
 		settings = {}
 	}
 
-	// make available for getToken
-	username = platform.username
-	password = platform.password
-	
 	axios.defaults.baseURL = baseURL
 	
 	if (platform.homeId)
@@ -128,6 +129,129 @@ module.exports = async function (platform) {
 }
 
 
+function getDeviceCode() {
+    return new Promise(async (resolve, reject) => {
+        try {
+            if (deviceCode) {
+                resolve({
+                    device_code: deviceCode
+                });
+		//log.easyDebug(`Device code: ${deviceCode}`)
+            } else {
+                reject(new Error("Device code not found in Homebridge config"));
+            }
+        } catch (err) {
+            reject(err);
+        }
+    });
+}
+
+function readTokenFromStorage() {
+    return new Promise((resolve, reject) => {
+	tokenSettings = storage.getItem('tadoToken')
+            .then(token => resolve(token))
+            .catch(error => {
+                log.easyDebug("Error reading token from storage:", error);
+                reject(error);
+            });
+    });
+}
+
+function saveTokenToStorage(tokenData) {
+    return new Promise((resolve, reject) => {
+	tokenSettings = storage.setItem('tadoToken', tokenData)
+            .then(() => {
+                log.easyDebug("Token saved to storage.");
+                resolve();
+            })
+            .catch(error => {
+                log.easyDebug("Error saving token to storage:", error);
+                reject(error);
+            });
+    });
+}
+
+
+function requestToken(deviceCode) {
+    return new Promise((resolve, reject) => {
+        // Read the token from storage
+        readTokenFromStorage().then(storedToken => {
+            // Check if a token exists and if it is still valid
+            if (storedToken && storedToken.expirationDate > Date.now()) {
+                log.easyDebug("Using existing valid token from storage.");
+                resolve(storedToken.key);
+                return;
+            }
+
+            // If token is expired or doesn't exist, try refreshing it
+            if (storedToken && storedToken.expirationDate <= Date.now()) {
+                log.easyDebug("Token expired, refreshing...");
+                axios.post('https://login.tado.com/oauth2/token', qs.stringify({
+                    client_id: clientId,
+                    grant_type: 'refresh_token',
+                    refresh_token: storedToken.refresh_token
+                }))
+                .then(refreshResponse => {
+                    if (refreshResponse.data.access_token) {
+                        // Update token with new access token and expiration date
+                        const refreshedToken = {
+                            key: refreshResponse.data.access_token,
+                            expirationDate: Date.now() + refreshResponse.data.expires_in * 1000,
+                            refresh_token: refreshResponse.data.refresh_token
+                        };
+                        saveTokenToStorage(refreshedToken).then(() => {
+                            resolve(refreshedToken.key);
+                        }).catch(err => {
+                            reject(err);
+                        });
+                    } else {
+                        reject("Failed to refresh token");
+                    }
+                })
+                .catch(err => {
+                    reject(err);
+                });
+                return;
+            }
+
+            // If no valid token, request a new token using device code
+            log.easyDebug("No valid token, requesting a new one...");
+            (function requestNewToken() {
+                axios.post('https://login.tado.com/oauth2/token', qs.stringify({
+                    client_id: clientId,
+                    device_code: deviceCode,
+                    grant_type: 'urn:ietf:params:oauth:grant-type:device_code'
+                }))
+                .then(response => {
+                    if (response.data.access_token) {
+                        // Save the new token and return it
+                        const newToken = {
+                            key: response.data.access_token,
+                            expirationDate: Date.now() + response.data.expires_in * 1000,
+                            refresh_token: response.data.refresh_token
+                        };
+                        saveTokenToStorage(newToken).then(() => {
+                            resolve(newToken.key);
+                        }).catch(err => {
+                            reject(err);
+                        });
+                    }
+                })
+                .catch(err => {
+                    if (err.response && err.response.status === 400 && err.response.data.error === 'authorization_pending') {
+                        log.easyDebug(`Waiting for user authorization...`);
+                        setTimeout(requestNewToken, 5000);
+                    } else {
+                        reject(err);
+                    }
+                });
+            })();
+        }).catch(err => {
+            reject(err);
+        });
+    });
+}
+
 function getRequest(url) {
 	return new Promise(async (resolve, reject) => {
 
@@ -198,49 +322,22 @@ function setRequest(method, url, data) {
 }
 
 function getToken() {
-	// eslint-disable-next-line no-async-promise-executor
-	return new Promise(async (resolve, reject) => {
-		
-		if (token && new Date().getTime() < token.expirationDate) {
-			// log.easyDebug('Found valid token in cache')
-			resolve(token.key)
-			return
-		}
-	
-		let data = {
-			grant_type: 'password',
-			client_id: 'tado-web-app',
-			client_secret: 'wZaRN7rpjn3FoNyF5IFuxg9uMzYJcvOoQ8QWiIqS3hfk6gLhVlG57j5YNoZL2Rtc',
-			username: username,
-			password: password,
-			scope: 'home.user'
-		}
-		data = qs.stringify(data, { encode: false })
-		const url = `https://auth.tado.com/oauth/token`
+    return new Promise(async (resolve, reject) => {
+        try {
+            if (token && Date.now() < token.expirationDate) {
+                return resolve(token.key);
+            }
 
-		axios.post(url, data)
-			.then(async response => {
-				if (response.data.access_token) {
-					token = {
-						key: response.data.access_token,
-						expirationDate: new Date().getTime() + response.data.expires_in*1000
-					}
-					log.easyDebug('Token successfully acquired from tado° API')
-					// log.easyDebug(token)
-					resolve(token.key)
-				} else {
-					const error = `Could NOT complete the token request -> ERROR: "${response.data}"`
-					log(error)
-					reject(error)
-				}
-			})
-			.catch(err => {
-				const error = `Could NOT complete the token request -> ERROR: "${err.response.data.error_description || err.response.data.error}"`
-				log(error)
-				reject(error)
-			})
-	})
+            const deviceCodeData = await getDeviceCode();
+            const newToken = await requestToken(deviceCodeData.device_code)
+            resolve(newToken);
+        } catch (err) {
+	    log.easyDebug(`Failed to get token`)
+            reject(err);
+        }
+    });
 }
+
 
 const get = {
 	HomeId: async () => {
